@@ -1708,9 +1708,8 @@ function readApkInfo() {
 // ---------------------------------------------------------------- 认证
 const AUTH_FILE = path.join(__dirname, 'auth.json');
 
-// PI_API_ONLY=1 时只提供 API（/ws、/api/*、/download/*），不托管任何网页。
-// APK 内置了完整 UI，服务器无需再暴露页面。
-const API_ONLY = process.env.PI_API_ONLY === '1' || process.env.PI_API_ONLY === 'true';
+// 只提供 API（/ws、/api/*、/download/*），不托管任何网页。
+// UI 全部内置在 APK 里，服务器不对外暴露 HTML 页面。
 
 // 图片缩略图缓存
 const THUMB_DIR = path.join(__dirname, 'cache', 'thumbs');
@@ -2022,8 +2021,6 @@ function safeEq(a, b) {
 /** 是否需要鉴权（token 未配置时全放开） */
 function authRequired(url) {
   if (!AUTH.enabled) return false;
-  // 登录页（仅非 API_ONLY 模式提供）
-  if (!API_ONLY && (url.pathname === '/login' || url.pathname === '/login.html')) return false;
   if (url.pathname === '/api/login' || url.pathname === '/api/logout') return false;
   if (url.pathname === '/api/meta') return false;
   if (url.pathname === '/api/me') return false;
@@ -2033,7 +2030,6 @@ function authRequired(url) {
   // 工具图片：<img> 无法带 Authorization 头，改用 ?token= 由各自校验
   if (url.pathname.startsWith('/api/toolimg/')) return !url.searchParams.get('token');
   if (url.pathname === '/health') return false;
-  if (url.pathname === '/manifest.webmanifest' || url.pathname === '/favicon.ico') return false;
   return true;
 }
 
@@ -2236,14 +2232,11 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname.startsWith('/api/')) {
         res.writeHead(401, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '未登录' }));
-      } else if (API_ONLY) {
-        // API-ONLY：没有登录页可跳，直接 404（不泄露页面是否存在）
+      } else {
+        // 没有登录页可跳，直接 404（不泄露页面是否存在）
         res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
         res.end('Not Found. This server is API-only.');
-      } else {
-        const next = encodeURIComponent(url.pathname + url.search);
-        res.writeHead(302, { location: '/login?next=' + next + (session.expired ? '&expired=1' : '') });
-        res.end();
+        return;
       }
       return;
     }
@@ -2475,35 +2468,9 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/health') { res.writeHead(200); res.end('ok'); return; }
 
-  // API_ONLY：不托管页面，只留极少静态资源（图标/manifest 供 PWA 探测）
-  if (API_ONLY) {
-    const ALLOW = new Set(['/favicon.ico', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png']);
-    if (!ALLOW.has(url.pathname)) {
-      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-      res.end('Not Found. This server is API-only.');
-      return;
-    }
-  }
-
-  const MIME2 = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
-  let p = url.pathname === '/' ? '/index.html' : url.pathname;
-  if (p === '/login') p = '/login.html';
-  p = p.replace(/\.\./g, '');
-  const file = path.join(__dirname, 'public', p);
-  if (!file.startsWith(path.join(__dirname, 'public'))) { res.writeHead(403); res.end(); return; }
-  fs.readFile(file, (err, data) => {
-    if (err) { res.writeHead(404); res.end('not found'); return; }
-    const headers = {
-      'content-type': MIME2[path.extname(file)] || 'application/octet-stream',
-      'cache-control': 'no-cache',
-    };
-    // 基础安全头
-    headers['x-content-type-options'] = 'nosniff';
-    headers['referrer-policy'] = 'same-origin';
-    if (path.extname(file) === '.html') headers['x-frame-options'] = 'DENY';
-    res.writeHead(200, headers);
-    res.end(data);
-  });
+  // 不托管任何网页：所有非 API 路径一律 404
+  res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+  res.end('Not Found. This server is API-only.\n安装 APK 使用：/download/pi-mobile-<版本>.apk');
 });
 
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -2787,7 +2754,7 @@ hb.unref?.();
 loadAuth();
 
 server.listen(CONFIG.port, CONFIG.host, () => {
-  log(`pi-mobile 已启动: http://${CONFIG.host}:${CONFIG.port}` + (API_ONLY ? '  [API-ONLY：不托管页面]' : ''));
+  log(`pi-mobile 已启动: http://${CONFIG.host}:${CONFIG.port}  [仅 API，不托管页面]`);
   log(`pi bin: ${CONFIG.piBin}  sessionDir: ${CONFIG.sessionDir}`);
 });
 

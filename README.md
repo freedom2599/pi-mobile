@@ -1,42 +1,74 @@
 # pi-mobile
 
-手机浏览器控制多台机器上的 pi coding agent。一个 Node 进程，一个 PWA 页面。
+手机端控制多台机器上的 pi coding agent。一个 Node 进程，一个内置全部界面的 Android APK。
 
 ```
-手机浏览器 ──WebSocket──> server.js ┬─ spawn ──> 本机 pi --mode rpc
-                                    └─ ssh2  ──> 远程 pi --mode rpc
+APK ──WebSocket──> server.js ┬─ spawn ──> 本机 pi --mode rpc
+                             └─ ssh2  ──> 远程 pi --mode rpc
 ```
+
+服务器**只提供 API**，不托管任何网页。
 
 ## 快速开始
 
 ```bash
 npm install
-cp devices.example.json devices.json   # 按需改
-node server.js
+
+# 首次启动必须设密码（不设则无密码保护）
+PI_MOBILE_TOKEN='你的密码' ./service.sh start
 ```
 
-打开 `http://<IP>:8848`，手机浏览器「添加到主屏幕」。
+然后在手机装 APK，打开后填服务器地址即可。
 
-### 只给 APK 用（推荐）
-
-装了 APK 后，服务器不需要再暴露网页。加 `PI_API_ONLY=1`：
+### 1. 起服务
 
 ```bash
-PI_API_ONLY=1 node server.js
+./service.sh start          # 后台启动
+./service.sh status         # 状态 + 健康检查
+./service.sh logs           # 跟日志
+./service.sh restart        # 重启
+./service.sh stop           # 停止
 ```
 
-此时：
+首次启动设密码：
 
-| 路径 | 行为 |
+```bash
+PI_MOBILE_TOKEN='你的密码' ./service.sh start
+```
+
+密码只在此次生效，之后写入 `auth.json`（scrypt 哈希，权限 600），
+后续启动不再读环境变量。改密码用 App 内「设置 → 修改登录密码」。
+
+### 2. 装 APK
+
+下载地址：`http://<服务器IP>:8848/download/pi-mobile-<版本>.apk`
+
+首次安装后，后续更新在 App 内「设置 → 检查更新」完成。
+落后 2 个版本会强制更新。
+
+### 暴露的路径
+
+只有这些，其余一律 404：
+
+| 路径 | 说明 |
 |---|---|
-| `/`、`/login`、`/index.html` 等所有页面 | **404** |
-| `/api/*` | 正常（需 Bearer token 或 cookie） |
-| `/ws` | 正常（需 `?token=`） |
-| `/download/*.apk` | 正常（免登录，供更新用） |
-| `/health` | 正常 |
-| `/favicon.ico` 等极少数静态资源 | 正常 |
+| `/api/*` | 接口（需 Bearer token 或 cookie） |
+| `/ws` | WebSocket（需 `?token=`） |
+| `/download/*.apk` | APK 下载（免登录） |
+| `/health` | 健康检查 |
 
-APK 的界面全部内置，服务器只当 API 端点，攻击面最小。
+**没有任何网页**：`/`、`/login`、`/index.html` 全部 404。
+
+### 3. 添加远程设备
+
+App 里点顶部设备名 →「＋ 添加 SSH 设备」，填地址、用户名、密码或密钥即可。
+
+**目标机零安装**：不需要部署任何脚本。会话列表和读取通过
+`node -e` 执行内联脚本调用 pi 自带的 `SessionManager`，磁盘上不新增文件。
+
+目标机只需：SSH 可登录 + 装了 pi（有 node）。
+
+对应的 `devices.json` 手写方式见下文。
 
 ## 多设备（SSH）
 
@@ -79,7 +111,7 @@ APK 的界面全部内置，服务器只当 API 端点，攻击面最小。
 
 不需要 node，不需要拷贝脚本，不需要任何部署步骤。
 
-### 在网页上添加设备
+### 在 App 里添加设备
 
 不用改配置文件。手机端点顶栏设备名 →「＋ 添加 SSH 设备」，填：
 
@@ -152,7 +184,6 @@ ssh srv-a 'ls ~/.nvm/versions/node/*/bin/node'
 | `PI_SESSION_DIR` | `~/.pi/agent/sessions` | 本机会话目录 |
 | `PI_DEVICES_FILE` | `./devices.json` | 设备配置文件 |
 | `PI_EXTRA_DEVICES` | 空 | JSON 数组，追加设备（可与文件并存） |
-| `PI_API_ONLY` | 空 | 设为 `1` 时**只提供 API**（`/ws`、`/api/*`、`/download/*`），不托管任何网页。手机端用 APK 时建议开启 |
 
 ## 功能
 
@@ -289,14 +320,15 @@ tail -f logs/auth.log | jq -r '"\(.ts) \(.event) \(.ip) \(.ua)"'
 
 ```
 server.js                    后端：WS + 双 transport（spawn / ssh2）
-public/index.html            前端：全部 UI（单文件）
+service.sh                   服务管理（start/stop/restart/status/logs）
+publish-apk.sh               发版：读 APK 版本 → 更新 apk-version.json
 devices.example.json         设备配置示例
+releases/                    APK 存放（不发到 git）
 ```
 
 ## 已知限制
 
 - 历史超 150 条只渲染尾部（防手机卡顿）
-- 图片消息显示占位，不发图
-- 远端 helper 会自动搜索 pi 托管安装目录（`~/.pi/agent/install/releases/*/node_modules/...`），
-  也支持 `PI_PKG` 环境变量指定
+- 远端会话读取依赖目标机有 node（`node -e` 内联脚本），可用 `PI_PKG` 指定 pi 包位置
 - 每个设备一个常驻 pi 进程，`maxSessions` 未做上限控制
+- 图片全屏查看会生成 1600px JPEG 缩略图，缓存 6 小时后清理
