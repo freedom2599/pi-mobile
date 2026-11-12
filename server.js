@@ -125,12 +125,42 @@ function wrapRemoteCmd(dev, inner) {
  * 不加 -ExecutionPolicy Bypass 的话，某些机器上脚本会被策略拦截。
  */
 function wrapWinCmd(dev, inner) {
-  // 先切 UTF-8 代码页，避免中文路径输出乱码（GBK → UTF-8）
-  // 末尾用 Out-String 并强制 UTF-8 输出，减少 CLIXML 噪音
   const prelude = "$ProgressPreference='SilentlyContinue';[Console]::OutputEncoding=[Text.Encoding]::UTF8;";
-  const full = prelude + inner;
-  const b64 = Buffer.from(full, 'utf16le').toString('base64');
-  return `chcp 65001 >nul 2>&1 & powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -OutputFormat Text -EncodedCommand ${b64}`;
+  const b64 = Buffer.from(prelude + inner, 'utf16le').toString('base64');
+  // 不再前置 chcp（那会多起一个 cmd 进程，且每条命令都弹一次控制台）
+  // -OutputFormat Text 去掉 CLIXML 噪音
+  return `powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -OutputFormat Text -EncodedCommand ${b64}`;
+}
+
+/**
+ * Windows：直接用 node 执行内联脚本，不经过 cmd / powershell。
+ *
+ * 为什么不用 wrapWinCmd：
+ *   sshd 每执行一条命令都会为 shell 创建控制台，cmd/powershell 会闪窗。
+ *   直接调 node.exe（控制台程序，但 sshd 用隐藏控制台）不会弹窗。
+ */
+function winNodeExec(dev, script, timeoutMs = 30000) {
+  const nb = dev.pathPrefix || dev.nodeBin || '';
+  const nodeExe = nb ? (nb.replace(/[\\/]+$/, '') + '\\node.exe') : 'node.exe';
+  const b64 = Buffer.from(String(script), 'utf8').toString('base64');
+  return sshExec(dev, winExecCmd(nodeExe, b64), timeoutMs);
+}
+
+/**
+ * Windows 命令包装：cmd /c "..." 包裹。
+ * sshd 把 exec 命令交给 cmd 解析，多层引号需要显式 cmd /c 才不出错。
+ */
+function winExecCmd(nodeExe, b64, extraArgs = []) {
+  // 不经过 cmd / powershell：sshd 直接执行 node.exe（无控制台窗口）。
+  // 参数各自加引号；末尾反斜杠要去掉，否则会转义收尾引号。
+  const args = [
+    `"${nodeExe}"`,
+    '-e',
+    '"eval(Buffer.from(process.argv[1],\'base64\').toString())"',
+    `"${b64}"`,
+    ...extraArgs.map(a => `"${String(a).replace(/"/g, '\\"').replace(/\\+$/, '')}"`),
+  ];
+  return args.join(' ');
 }
 
 /** 统一入口：按设备平台选择包装方式 */
@@ -987,14 +1017,8 @@ class PiSession {
       // 又让 node 作为其子进程存活到 PowerShell 退出。
       // 实测：RPC 收发正常（bridge 本身是 node 流式管道，无缓冲问题）。
       const b64 = Buffer.from(bridgeSrc, 'utf8').toString('base64');
-      const psSrc = [
-        "$ErrorActionPreference='Continue'",
-        "[Console]::OutputEncoding=[Text.Encoding]::UTF8",
-        `$b=[Text.Encoding]::UTF8.GetBytes([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}')))`,
-        `& ${psQuote(nodeExe)} -e "eval(Buffer.from(process.argv[1],'base64').toString())" ([Convert]::ToBase64String($b))`,
-      ].join('; ');
-      const psB64 = Buffer.from(psSrc, 'utf16le').toString('base64');
-      cmd = `powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ${psB64}`;
+      // 与短命令一致：cmd /c 包裹，不再经过 PowerShell（少一层进程，少一次控制台）
+      cmd = winExecCmd(nodeExe, b64);
     } else {
       const inner = [
         `cd ${cwd.startsWith('~') ? cwd : shellQuote(cwd)}`,
@@ -1504,21 +1528,29 @@ async function listDirLocal(dir) {
   return out;
 }
 
-/** 列出远程目录（Windows / PowerShell） */
+/** 列出远程目录（Windows：node 直接读文件系统，不经过 shell） */
 async function listDirRemoteWin(dev, dir) {
-  const inner = [
-    `$p = ${psQuote(dir)}`,
-    `if (-not (Test-Path -LiteralPath $p)) { Write-Output '__ERR__'; exit }`,
-    `Get-ChildItem -LiteralPath $p -Force | ForEach-Object {`,
-    `  $t = if ($_.PSIsContainer) { 'd' } elseif ($_.LinkType) { 'l' } else { 'f' }`,
-    `  $mt = [int64](($_.LastWriteTimeUtc - [datetime]'1970-01-01').TotalSeconds)`,
-    `  $sz = if ($_.PSIsContainer) { 0 } else { $_.Length }`,
-    '  Write-Output ($t + "`t" + $sz + "`t" + $mt + "`t" + $_.Name)',
-    `}`,
-  ].join('\n');
-  const r = await sshExec(dev, wrapWinCmd(dev, inner), 25000);
+  const script = [
+    "const fs=require('fs'),path=require('path');",
+    "const dir=process.argv[2];",
+    "const out=[];",
+    "for(const e of fs.readdirSync(dir,{withFileTypes:true})){",
+    "  const st=fs.statSync(path.join(dir,e.name),{throwIfNoEntry:false});",
+    "  const t=e.isDirectory()?'d':(e.isSymbolicLink()?'l':'f');",
+    "  out.push([t, st?st.size:0, st?Math.floor(st.mtimeMs/1000):0, e.name].join(String.fromCharCode(9)));",
+    "}",
+    "process.stdout.write(out.join(String.fromCharCode(10)));",
+  ].join(String.fromCharCode(10));
+
+  const b64 = Buffer.from(script, 'utf8').toString('base64');
+  const nb = dev.pathPrefix || dev.nodeBin || '';
+  const nodeExe = nb ? (nb.replace(/[\\/]+$/, '') + '\\node.exe') : 'node.exe';
+  const r = await sshExec(dev, winExecCmd(nodeExe, b64, [dir]), 25000);
+
   const lines = String(r.stdout || '').split('\n').map(x => x.replace(/\r$/, '')).filter(Boolean);
-  if (lines.some(l => l.startsWith('__ERR__'))) throw new Error('目录不存在: ' + dir);
+  if (r.code !== 0 && !lines.length) {
+    throw new Error('目录不存在或无法读取: ' + dir + (r.stderr ? ' (' + String(r.stderr).slice(0, 100) + ')' : ''));
+  }
 
   const out = [];
   for (const line of lines) {
@@ -1608,16 +1640,16 @@ const ATTACH = {
 /** 文件大小；不存在返回 null */
 async function remoteStatSize(dev, filePath) {
   if (isWin(dev)) {
-    const inner = `
-$p = ${psQuote(filePath)}
-if (Test-Path -LiteralPath $p -PathType Leaf) {
-  (Get-Item -LiteralPath $p).Length
-} else { 'ERR' }
+    const script = `
+const fs=require('fs');
+try{ process.stdout.write(String(fs.statSync(process.argv[2]).size)) }catch{ process.stdout.write('ERR') }
 `;
-    const r = await sshExec(dev, wrapWinCmd(dev, inner.trim()), 15000);
-    const v = String(r.stdout || '').trim().split('\n').pop();
-    if (!v || v === 'ERR' || !/^\d+$/.test(v)) return null;
-    return Number(v);
+    const b64 = Buffer.from(script,'utf8').toString('base64');
+    const nb = dev.pathPrefix || dev.nodeBin || '';
+    const nodeExe = nb ? (nb.replace(/[\\/]+$/,'') + '\\node.exe') : 'node.exe';
+    const r = await sshExec(dev, winExecCmd(nodeExe, b64, [filePath]), 15000);
+    const v = String(r.stdout || '').trim();
+    return /^\d+$/.test(v) ? Number(v) : null;
   }
   const r = await sshExec(dev, wrapRemoteCmd(dev, `stat -c '%s' ${shellQuote(filePath)} 2>/dev/null || echo ERR`), 15000);
   const v = String(r.stdout || '').trim().split('\n').pop();
@@ -1628,17 +1660,20 @@ if (Test-Path -LiteralPath $p -PathType Leaf) {
 /** 读文件前 N 字节（二进制） */
 async function remoteReadBytes(dev, filePath, maxBytes) {
   if (isWin(dev)) {
-    const inner = `
-$p = ${psQuote(filePath)}
-$fs = [IO.File]::OpenRead($p)
-try {
-  $n = [Math]::Min(${Number(maxBytes)}, $fs.Length)
-  $buf = New-Object byte[] $n
-  $read = $fs.Read($buf, 0, $n)
-  [Convert]::ToBase64String($buf, 0, $read)
-} finally { $fs.Close() }
+    const script = `
+const fs=require('fs');
+const fd=fs.openSync(process.argv[2],'r');
+try{
+  const n=Math.min(Number(process.argv[3]), fs.fstatSync(fd).size);
+  const buf=Buffer.alloc(n);
+  fs.readSync(fd,buf,0,n,0);
+  process.stdout.write(buf.toString('base64'));
+}finally{ fs.closeSync(fd) }
 `;
-    const r = await sshExec(dev, wrapWinCmd(dev, inner.trim()), 40000);
+    const b64 = Buffer.from(script,'utf8').toString('base64');
+    const nb = dev.pathPrefix || dev.nodeBin || '';
+    const nodeExe = nb ? (nb.replace(/[\\/]+$/,'') + '\\node.exe') : 'node.exe';
+    const r = await sshExec(dev, winExecCmd(nodeExe, b64, [filePath, String(maxBytes)]), 40000);
     return Buffer.from(String(r.stdout || '').replace(/\s+/g, ''), 'base64');
   }
   const r = await sshExec(dev, wrapRemoteCmd(dev, `head -c ${Number(maxBytes)} ${shellQuote(filePath)} | base64 -w0`), 40000);
@@ -1648,8 +1683,11 @@ try {
 /** 读文件全文（二进制，用于图片预览） */
 async function remoteReadAll(dev, filePath) {
   if (isWin(dev)) {
-    const inner = `[Convert]::ToBase64String([IO.File]::ReadAllBytes(${psQuote(filePath)}))`;
-    const r = await sshExec(dev, wrapWinCmd(dev, inner), 60000);
+    const script = `process.stdout.write(require('fs').readFileSync(process.argv[2]).toString('base64'))`;
+    const b64 = Buffer.from(script,'utf8').toString('base64');
+    const nb = dev.pathPrefix || dev.nodeBin || '';
+    const nodeExe = nb ? (nb.replace(/[\\/]+$/,'') + '\\node.exe') : 'node.exe';
+    const r = await sshExec(dev, winExecCmd(nodeExe, b64, [filePath]), 60000);
     return Buffer.from(String(r.stdout || '').replace(/\s+/g, ''), 'base64');
   }
   const r = await sshExec(dev, wrapRemoteCmd(dev, `base64 -w0 ${shellQuote(filePath)}`), 40000);
@@ -1659,17 +1697,20 @@ async function remoteReadAll(dev, filePath) {
 /** 读文件文本（前 N 字节） */
 async function remoteReadText(dev, filePath, maxBytes) {
   if (isWin(dev)) {
-    const inner = `
-$p = ${psQuote(filePath)}
-$fs = [IO.File]::OpenRead($p)
-try {
-  $n = [Math]::Min(${Number(maxBytes)}, $fs.Length)
-  $buf = New-Object byte[] $n
-  $read = $fs.Read($buf, 0, $n)
-  [Console]::Out.Write([Text.Encoding]::UTF8.GetString($buf, 0, $read))
-} finally { $fs.Close() }
+    const script = `
+const fs=require('fs');
+const fd=fs.openSync(process.argv[2],'r');
+try{
+  const n=Math.min(Number(process.argv[3]), fs.fstatSync(fd).size);
+  const buf=Buffer.alloc(n);
+  const r=fs.readSync(fd,buf,0,n,0);
+  process.stdout.write(buf.subarray(0,r));
+}finally{ fs.closeSync(fd) }
 `;
-    const r = await sshExec(dev, wrapWinCmd(dev, inner.trim()), 30000);
+    const b64 = Buffer.from(script,'utf8').toString('base64');
+    const nb = dev.pathPrefix || dev.nodeBin || '';
+    const nodeExe = nb ? (nb.replace(/[\\/]+$/,'') + '\\node.exe') : 'node.exe';
+    const r = await sshExec(dev, winExecCmd(nodeExe, b64, [filePath, String(maxBytes)]), 30000);
     return String(r.stdout || '');
   }
   const r = await sshExec(dev, wrapRemoteCmd(dev, `head -c ${Number(maxBytes)} ${shellQuote(filePath)} 2>/dev/null`), 30000);
