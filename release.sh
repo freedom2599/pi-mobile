@@ -109,9 +109,11 @@ echo "▶️  更新版本号…"
 sed -i "s/versionCode [0-9]\+/versionCode $NEXT_CODE/" "$GRADLE"
 sed -i "s/versionName \"[^\"]*\"/versionName \"$NEXT_NAME\"/" "$GRADLE"
 sed -i "s/window.__APP_VERSION__ = [0-9]\+;/window.__APP_VERSION__ = $NEXT_CODE;/" "$WWW_INDEX"
+sed -i "s/window.__APP_VERSION_NAME__ = '[^']*';/window.__APP_VERSION_NAME__ = '$NEXT_NAME';/" "$WWW_INDEX"
 
 grep -q "versionCode $NEXT_CODE" "$GRADLE" || die "build.gradle 版本号写入失败"
-grep -q "__APP_VERSION__ = $NEXT_CODE" "$WWW_INDEX" || die "index.html 版本号写入失败"
+grep -q "__APP_VERSION__ = $NEXT_CODE" "$WWW_INDEX" || die "index.html versionCode 写入失败"
+grep -q "__APP_VERSION_NAME__ = '$NEXT_NAME'" "$WWW_INDEX" || die "index.html versionName 写入失败"
 
 echo "▶️  同步 web 资源…"
 cd "$APK_PROJ"

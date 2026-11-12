@@ -1,8 +1,8 @@
 {
-  "versionCode": 39,
-  "versionName": "0.4",
-  "publishedAt": "2026-11-12T03:01:44.183Z",
-  "notes": "第一个公开稳定版\n\n服务端\n- WebSocket 实时对话，Bearer token 认证\n- 多设备管理（本机 + SSH），远程设备零安装\n- 文件浏览、图片预览、大图自动缩略\n- APK 版本发布与强制更新\n- 客户端日志自动上报\n\n客户端\n- 界面全部内置，不依赖服务器托管网页\n- Markdown 渲染（代码块/表格/列表/引用）\n- 对话搜索、按时间分组、可折叠\n- 流式回答中发消息即时 steer\n- 应用内下载更新并自动拉起安装器",
-  "url": "/download/pi-mobile-0.4.apk",
-  "size": 2987921
+  "versionCode": 40,
+  "versionName": "0.41",
+  "publishedAt": "2026-11-12T03:20:16.299Z",
+  "notes": "修复版本号显示：区分 versionCode(39) 和 versionName(0.4)\n\n- 之前显示成 v0.39，实际应该是 v0.4\n- 现在版本名单独传入，不再拼接 versionCode\n- 检查更新已是最新时会明确提示",
+  "url": "/download/pi-mobile-0.41.apk",
+  "size": 2988100
 }
