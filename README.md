@@ -19,6 +19,20 @@ https://github.com/freedom2599/pi-mobile/releases/latest
 
 安装时需允许「安装未知应用」。APK 为自签名，非商店分发。
 
+## 版本与发布
+
+两条线，`versionCode` 始终递增（否则手机装不上、检测不到升级）：
+
+| 类型 | versionName | 发布到 |
+|---|---|---|
+| 内部测试 | `0.xx`（如 0.38） | 只发自建服务器 |
+| 公开稳定 | `0.x`（如 0.4） | 自建服务器 + GitHub Releases |
+
+```bash
+./release.sh test "改动说明"      # 内部测试，不推 GitHub
+./release.sh stable "改动说明"    # 稳定版，打包前会要求确认
+```
+
 ## 快速开始
 
 ```bash
