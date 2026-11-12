@@ -1,0 +1,14 @@
+node_modules/
+devices.json
+auth.json
+logs/
+*.log
+
+# 密钥
+.env
+.env.local
+
+# 运行时产物
+cache/
+releases/
+.server.pid
