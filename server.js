@@ -1531,6 +1531,28 @@ async function listDirLocal(dir) {
 }
 
 /** 列出远程目录（Windows：node 直接读文件系统，不经过 shell） */
+/** 列出可用盘符（Windows） */
+async function listDrives(dev) {
+  if (isWin(dev)) {
+    const script = [
+      "const fs=require('fs');",
+      "const out=[];",
+      "for(let c=65;c<=90;c++){",
+      "  const d=String.fromCharCode(c)+':';",
+      "  try{ fs.readdirSync(d); out.push(d); }catch(e){ if(e.code!=='ENOENT') out.push(d); }",
+      "}",
+      "process.stdout.write(out.join(String.fromCharCode(10)));",
+    ].join(String.fromCharCode(10));
+    const b64 = Buffer.from(script, 'utf8').toString('base64');
+    const nb = dev.pathPrefix || dev.nodeBin || '';
+    const nodeExe = nb ? (nb.replace(/[\\/]+$/, '') + '\\node.exe') : 'node.exe';
+    const r = await sshExec(dev, winExecCmd(nodeExe, b64), 20000);
+    return String(r.stdout || '').split('\n').map(x => x.trim()).filter(x => /^[A-Z]:$/.test(x));
+  }
+  // POSIX：只有根
+  return ['/'];
+}
+
 async function listDirRemoteWin(dev, dir) {
   const script = [
     "const fs=require('fs'),path=require('path');",
@@ -2663,6 +2685,21 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---------- 文件浏览 ----------
+  // ---------- 盘符列表（Windows）/ 根目录（POSIX） ----------
+  if (url.pathname === '/api/drives') {
+    const devId = url.searchParams.get('device') || 'local';
+    const dev = DEVICES.find(d => d.id === devId) || DEVICES[0];
+    try {
+      const drives = await listDrives(dev);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, drives }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
   if (url.pathname === '/api/files' || url.pathname === '/api/file') {
     const devId = url.searchParams.get('device') || 'local';
     const dev = DEVICES.find(d => d.id === devId) || DEVICES[0];

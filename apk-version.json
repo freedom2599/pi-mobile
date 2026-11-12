@@ -1,8 +1,8 @@
 {
-  "versionCode": 45,
-  "versionName": "0.46",
-  "publishedAt": "2026-11-12T05:58:27.591Z",
-  "notes": "修复 Windows 文件浏览两个问题\n\n修复：路径显示成 //C:\\Users\\\n  前端 joinPath / 面包屑硬编码了 /，现在按盘符自动用反斜杠\n\n修复：C:\\ 根目录报 EINVAL (pagefile.sys)\n  系统文件的 stat 会抛异常，现在忽略该错误仍保留条目\n  C:\\ 现在能正常列出 29 项，含 pagefile.sys / Windows\n\n修复：C:\\ 被当成 C:\n  参数末尾反斜杠改为双写，而不是剥离",
-  "url": "/download/pi-mobile-0.46.apk",
-  "size": 2988705
+  "versionCode": 46,
+  "versionName": "0.47",
+  "publishedAt": "2026-11-12T06:06:31.305Z",
+  "notes": "文件浏览器支持切换盘符\n\n新增：Windows 下点面包屑最左侧的盘符可切换到其它盘\n  /api/drives 接口扫描可用盘符（C: ~ I:）\n改进：文件列表请求增加超时与一次重试\n  远程首连较慢时不会一直卡在「加载中」",
+  "url": "/download/pi-mobile-0.47.apk",
+  "size": 2989423
 }
