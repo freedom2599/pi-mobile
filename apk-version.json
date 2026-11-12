@@ -1,8 +1,8 @@
 {
-  "versionCode": 37,
-  "versionName": "0.37",
-  "publishedAt": "2026-11-12T02:32:16.370Z",
-  "notes": "测试版 0.37\n\n新增：点「状态」弹出会话信息面板（设备/模型/思考级别/消息数/会话文件/工作目录）\n改进：设备测试结果改为独立弹窗，不再在抽屉里显示\n修复：底部「停止」按钮在没对话时也显示 —— 已删除，改为流式中才出现\n改进：设备列表备注只显示 IP，不再显示 ssh-xxx 内部 id",
-  "url": "/download/pi-mobile-0.37.apk",
-  "size": 2987922
+  "versionCode": 38,
+  "versionName": "0.38",
+  "publishedAt": "2026-11-12T02:50:16.455Z",
+  "notes": "测试版 0.38\n\n测试发版流程",
+  "url": "/download/pi-mobile-0.38.apk",
+  "size": 2987928
 }

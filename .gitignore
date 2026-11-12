@@ -12,3 +12,6 @@ logs/
 cache/
 releases/
 .server.pid
+
+# 发版状态
+.last-stable
