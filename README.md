@@ -9,6 +9,16 @@ APK ──WebSocket──> server.js ┬─ spawn ──> 本机 pi --mode rpc
 
 服务器**只提供 API**，不托管任何网页。
 
+## 下载
+
+最新 APK 在 [Releases](https://github.com/freedom2599/pi-mobile/releases/latest)。
+
+```
+https://github.com/freedom2599/pi-mobile/releases/latest
+```
+
+安装时需允许「安装未知应用」。APK 为自签名，非商店分发。
+
 ## 快速开始
 
 ```bash
@@ -41,7 +51,8 @@ PI_MOBILE_TOKEN='你的密码' ./service.sh start
 
 ### 2. 装 APK
 
-下载地址：`http://<服务器IP>:8848/download/pi-mobile-<版本>.apk`
+从 [Releases](https://github.com/freedom2599/pi-mobile/releases/latest) 下载，
+或用自己的服务器：`http://<服务器IP>:8848/download/pi-mobile-<版本>.apk`
 
 首次安装后，后续更新在 App 内「设置 → 检查更新」完成。
 落后 2 个版本会强制更新。
