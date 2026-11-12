@@ -121,6 +121,8 @@ echo "▶️  编译 APK…"
 cd "$APK_PROJ/android"
 export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
 export ANDROID_HOME=/opt/android-sdk
+# 签名配置来自 .env（不进仓库）
+if [ -f "$APK_PROJ/.env" ]; then set -a; . "$APK_PROJ/.env"; set +a; fi
 ./gradlew assembleRelease --no-daemon -q 2>&1 | tail -3 || die "编译失败"
 
 APK_OUT="$APK_PROJ/android/app/build/outputs/apk/release/app-release.apk"
