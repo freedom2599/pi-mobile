@@ -1,8 +1,8 @@
 {
-  "versionCode": 41,
-  "versionName": "0.42",
-  "publishedAt": "2026-11-12T03:36:31.245Z",
-  "notes": "支持连接 Windows 设备\n\n- 目标系统可选：自动检测 / Linux·macOS / Windows\n- Windows 走 PowerShell（-EncodedCommand 传参，避免引号转义问题）\n- 探测、文件列表、读文件、会话操作都有 Windows 实现\n- Windows 下自动隐藏「提权到 root」（无 sudo）\n- 装了 Git Bash 的 Windows 仍走 POSIX 分支\n\n目标机不需要装任何东西，只要开 OpenSSH Server",
-  "url": "/download/pi-mobile-0.42.apk",
-  "size": 2988415
+  "versionCode": 42,
+  "versionName": "0.43",
+  "publishedAt": "2026-11-12T04:38:37.078Z",
+  "notes": "支持 Windows 设备（无需安装任何东西）\n\n- 目标系统可选：自动检测 / Linux·macOS / Windows\n- Windows 通过 node 桥接启动 pi，管道不缓冲，RPC 实时\n- 窗口隐藏（windowsHide），不再弹控制台\n- 探测、文件列表、读写文件、会话操作全支持\n- Windows 下自动隐藏提权选项\n\n修复：ensureAlive 异步等待进程就绪，避免慢速设备上「pi 未运行」",
+  "url": "/download/pi-mobile-0.43.apk",
+  "size": 2988417
 }

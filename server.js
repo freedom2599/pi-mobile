@@ -125,7 +125,12 @@ function wrapRemoteCmd(dev, inner) {
  * 不加 -ExecutionPolicy Bypass 的话，某些机器上脚本会被策略拦截。
  */
 function wrapWinCmd(dev, inner) {
-  return `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(inner, 'utf16le').toString('base64')}`;
+  // 先切 UTF-8 代码页，避免中文路径输出乱码（GBK → UTF-8）
+  // 末尾用 Out-String 并强制 UTF-8 输出，减少 CLIXML 噪音
+  const prelude = "$ProgressPreference='SilentlyContinue';[Console]::OutputEncoding=[Text.Encoding]::UTF8;";
+  const full = prelude + inner;
+  const b64 = Buffer.from(full, 'utf16le').toString('base64');
+  return `chcp 65001 >nul 2>&1 & powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -OutputFormat Text -EncodedCommand ${b64}`;
 }
 
 /** 统一入口：按设备平台选择包装方式 */
@@ -454,16 +459,26 @@ async function testDevice(d) {
   const steps = [];
   const esc = d.escalate === true || d.escalate === 'sudo' || d.escalate === 'root';
   try {
-    // 1) 基础连接
-    const r = await sshExec(d, 'echo __ok__; uname -n 2>/dev/null; whoami', 20000);
-    if (!r.stdout.includes('__ok__')) throw new Error('shell 无响应');
-    const lines = r.stdout.split('\n').map(x => x.trim()).filter(Boolean);
-    steps.push('SSH 连接成功（用户 ' + (lines[2] || d.username || '?') + '）');
-    const hostname = lines.find(x => x !== '__ok__' && !x.startsWith('/') && !x.match(/^v\d/) && x !== lines[2]);
-    if (hostname) steps.push('主机名 ' + hostname);
+    // 1) 基础连接（Windows 用 PowerShell，POSIX 用 bash）
+    if (isWin(d)) {
+      const winChk = await sshExec(d, wrapWinCmd(d,
+        '[Console]::OutputEncoding=[Text.Encoding]::UTF8;Write-Output "__ok__";Write-Output $env:COMPUTERNAME;Write-Output $env:USERNAME'), 20000);
+      if (!winChk.stdout.includes('__ok__')) throw new Error('shell 无响应：' + String(winChk.stderr || '').slice(0, 150));
+      const wl = String(winChk.stdout).split('\n').map(x => x.trim().replace(/\r$/, '')).filter(Boolean);
+      steps.push('SSH 连接成功（用户 ' + (wl[2] || d.username || '?') + '）');
+      if (wl[1]) steps.push('主机名 ' + wl[1]);
+      steps.push('系统 Windows');
+    } else {
+      const r = await sshExec(d, 'echo __ok__; uname -n 2>/dev/null; whoami', 20000);
+      if (!r.stdout.includes('__ok__')) throw new Error('shell 无响应');
+      const lines = r.stdout.split('\n').map(x => x.trim()).filter(Boolean);
+      steps.push('SSH 连接成功（用户 ' + (lines[2] || d.username || '?') + '）');
+      const hostname = lines.find(x => x !== '__ok__' && !x.startsWith('/') && !x.match(/^v\d/) && x !== lines[2]);
+      if (hostname) steps.push('主机名 ' + hostname);
+    }
 
-    // 2) 提权检查
-    if (esc) {
+    // 2) 提权检查（Windows 无 sudo，跳过）
+    if (esc && !isWin(d)) {
       const sudoChk = await sshExec(d, 'sudo -n true 2>&1 && echo SUDO_OK || echo SUDO_FAIL', 15000);
       if (!sudoChk.stdout.includes('SUDO_OK')) {
         return {
@@ -512,6 +527,32 @@ async function testDevice(d) {
       steps.push(`node ${probe.nodeVer}${probe.nodeBin ? '（' + probe.nodeBin + '）' : ''}`);
     } else {
       steps.push('node 由 pi 自带 launcher 提供');
+    }
+
+    // 4.5) Windows：验证 pi RPC 能否启动（有窗口问题会在这里暴露）
+    if (isWin(d)) {
+      const launcher = probe.piLauncherPath;
+      const pnb = probe.nodeBin || probe.pathPrefix;
+      const nodeExe = pnb ? (pnb.replace(/[\\/]+$/, '') + '\\node.exe') : 'node.exe';
+      if (launcher) {
+        const testScript = [
+          `$psi = New-Object System.Diagnostics.ProcessStartInfo`,
+          `$psi.FileName = ${psQuote(nodeExe)}`,
+          `$psi.Arguments = '${launcher.replace(/'/g, "''")} --version'`,
+          `$psi.RedirectStandardOutput = $true`,
+          `$psi.RedirectStandardError = $true`,
+          `$psi.UseShellExecute = $false`,
+          `$psi.CreateNoWindow = $true`,
+          `$p = [System.Diagnostics.Process]::Start($psi)`,
+          `$out = $p.StandardOutput.ReadToEnd()`,
+          `$p.WaitForExit(8000) | Out-Null`,
+          `Write-Output ("__RPC__" + $out.Trim())`,
+        ].join('; ');
+        const rr = await sshExec(d, wrapWinCmd(d, testScript), 25000);
+        const m = String(rr.stdout || '').match(/__RPC__(.*)/);
+        if (m && m[1].trim()) steps.push('pi launcher 可执行：' + m[1].trim().slice(0, 40));
+        else steps.push('⚠️ pi launcher 未返回版本，启动可能有问题');
+      }
     }
 
     // 5) 会话目录（不需要 helper，shell 直接读）
@@ -744,6 +785,13 @@ async function probeDeviceWin(d) {
 
   const sessDir = pick('__SESSDIR__') ||
     (home + '\\.pi\\agent\\sessions');
+
+  // pi-launcher.js 优先（避免 pi.cmd 弹窗）
+  let piLauncherPath = '';
+  if (piPath) {
+    const dir = piPath.replace(/[\\/][^\\/]+$/i, '');
+    piLauncherPath = dir + '\\pi-launcher.js';
+  }
   const sessReadable = pick('__SESSREADABLE__') === 'yes';
   const hasPiHome = pick('__PIHOME__') === 'yes';
 
@@ -760,6 +808,7 @@ async function probeDeviceWin(d) {
     sessionDir: sessDir,
     sessionReadable: sessReadable,
     cwd: home,
+    piLauncherPath,
     helperPath: '',
   };
 }
@@ -904,12 +953,34 @@ class PiSession {
 
     let cmd;
     if (isWin(d)) {
-      // Windows：cd 到工作目录后启动 pi（pi 可能是 pi.cmd，PowerShell 需要 & 调用）
-      const piCall = /[\\/]|\.(cmd|bat|exe|ps1)$/i.test(piBin) ? `& ${psQuote(piBin)}` : 'pi';
-      const parts = [];
-      if (cwd) parts.push(`Set-Location -LiteralPath ${psQuote(cwd)}`);
-      parts.push(`${piCall} ${args.map(psQuote).join(' ')}`);
-      cmd = wrapWinCmd(d, parts.join('; '));
+      // Windows 桥接：SSH exec 通道 ←→ node 桥接 ←→ pi 子进程
+      //
+      // 已验证：cmd + node -e + base64 桥接脚本能让 pi 的 RPC 正常收发。
+      // 不用 PowerShell 直接转发，因为它的管道会缓冲，RPC 逐行 JSON 会被延迟。
+      const nb = d.pathPrefix || d.nodeBin || '';
+      const nodeExe = nb ? (nb.replace(/[\\/]+$/, '') + '\\node.exe') : 'node.exe';
+      let launcher = d.piLauncherPath;
+      if (!launcher && d.piBin) {
+        launcher = d.piBin.replace(/[\\/][^\\/]+$/i, '') + '\\pi-launcher.js';
+      }
+      if (!launcher) throw new Error('找不到 pi-launcher.js，请在设备配置里指定 piBin 或 piLauncherPath');
+
+      const bridgeSrc = [
+        "const { spawn } = require('child_process');",
+        `const child = spawn(${JSON.stringify(nodeExe)}, ${JSON.stringify([launcher, ...args])}, {`,
+        "  stdio: ['pipe','pipe','pipe'],",
+        `  cwd: ${JSON.stringify(cwd || d.homeHint || '')},`,
+        "  windowsHide: true,",
+        "});",
+        "process.stdin.pipe(child.stdin);",
+        "child.stdout.pipe(process.stdout);",
+        "child.stderr.pipe(process.stderr);",
+        "child.on('exit', c => process.exit(c || 0));",
+        "child.on('error', e => { process.stderr.write(String(e.message || e) + '\\n'); process.exit(1); });",
+      ].join('\n');
+
+      const b64 = Buffer.from(bridgeSrc, 'utf8').toString('base64');
+      cmd = `"${nodeExe}" -e "eval(Buffer.from(process.argv[1],'base64').toString())" "${b64}"`;
     } else {
       const inner = [
         `cd ${cwd.startsWith('~') ? cwd : shellQuote(cwd)}`,
@@ -961,7 +1032,7 @@ class PiSession {
   start() {
     if (this.proc) return;
     this.starting = true;
-    this.spawnTransport().then(t => {
+    this._startPromise = this.spawnTransport().then(t => {
       if (!this.starting) { t.kill(); return; }
       this.starting = false;
       this.proc = t;
@@ -998,10 +1069,12 @@ class PiSession {
           this.broadcastState();
         }
       }).catch(() => {});
+      this._startPromise = null;
     }).catch(e => {
       this.starting = false;
       this.alive = false;
       this.proc = null;
+      this._startPromise = null;
       warn(`[${this.dev.id}] 启动失败: ${e.message}`);
       this.pushSystem(`⚠️ 无法启动 pi: ${e.message}`);
       this.broadcast({ t: 'proc_error', message: e.message });
@@ -1009,7 +1082,11 @@ class PiSession {
   }
 
   ensureAlive() {
-    if (!this.alive) this.start();
+    if (this.alive && this.proc) return Promise.resolve();
+    // 已有一次启动在进行中：等它
+    if (this.starting && this._startPromise) return this._startPromise;
+    this.start();
+    return this._startPromise || Promise.resolve();
   }
 
   stop() {
@@ -1265,9 +1342,9 @@ class PiSession {
   }
 
   // -------------------------------------------------- 命令
-  send(type, payload = {}, timeoutMs = 30000) {
-    this.ensureAlive();
-    if (!this.proc) return Promise.reject(new Error('pi 未运行'));
+  async send(type, payload = {}, timeoutMs = 30000) {
+    await this.ensureAlive();
+    if (!this.proc) throw new Error('pi 未运行');
     const id = `m${++this.seq}`;
     const rec = { id, type, ...payload };
     return new Promise((resolve, reject) => {
