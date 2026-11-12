@@ -151,15 +151,16 @@ function winNodeExec(dev, script, timeoutMs = 30000) {
  * sshd 把 exec 命令交给 cmd 解析，多层引号需要显式 cmd /c 才不出错。
  */
 function winExecCmd(nodeExe, b64, extraArgs = []) {
-  // 不经过 cmd / powershell：sshd 直接执行 node.exe（无控制台窗口）。
-  // 参数各自加引号；末尾反斜杠要去掉，否则会转义收尾引号。
-  const args = [
-    `"${nodeExe}"`,
-    '-e',
-    '"eval(Buffer.from(process.argv[1],\'base64\').toString())"',
-    `"${b64}"`,
-    ...extraArgs.map(a => `"${String(a).replace(/"/g, '\\"').replace(/\\+$/, '')}"`),
-  ];
+  // 每个参数加引号。注意 cmd 规则：参数末尾的 \ 会转义收尾引号，
+  // 所以 "C:\" 要写成 "C:\\"（双写）。不是简单剥离。
+  const q = (v) => {
+    let t = String(v).replace(/"/g, '\\"');
+    // 末尾连续反斜杠加倍，避免转义结束引号
+    const m = t.match(/\\+$/);
+    if (m) t = t.slice(0, -m[0].length) + m[0] + m[0];
+    return '"' + t + '"';
+  };
+  const args = [q(nodeExe), '-e', q('eval(Buffer.from(process.argv[1],\'base64\').toString())'), q(b64), ...extraArgs.map(q)];
   return args.join(' ');
 }
 
@@ -1508,14 +1509,15 @@ async function listDirLocal(dir) {
     if (ignoreName(d.name)) continue;
     const full = require('path').join(resolved, d.name);
     let st = null;
-    try { st = await fsP.lstat(full); } catch { continue; }
-    const isDir = st.isDirectory();
-    const isLink = st.isSymbolicLink();
+    // lstat 失败（权限/特殊文件）时仍保留条目，只是大小时间为 0
+    try { st = await fsP.lstat(full); } catch { st = null; }
+    const isDir = st ? st.isDirectory() : d.isDirectory();
+    const isLink = st ? st.isSymbolicLink() : d.isSymbolicLink();
     out.push({
       name: d.name,
       type: isLink ? 'link' : isDir ? 'dir' : 'file',
-      size: isDir ? 0 : st.size,
-      mtime: st.mtimeMs,
+      size: (isDir || !st) ? 0 : st.size,
+      mtime: st ? st.mtimeMs : 0,
     });
   }
   // 目录优先 + 名称排序
@@ -1534,8 +1536,12 @@ async function listDirRemoteWin(dev, dir) {
     "const fs=require('fs'),path=require('path');",
     "const dir=process.argv[2];",
     "const out=[];",
-    "for(const e of fs.readdirSync(dir,{withFileTypes:true})){",
-    "  const st=fs.statSync(path.join(dir,e.name),{throwIfNoEntry:false});",
+    "let ents=[];",
+    "try{ ents=fs.readdirSync(dir,{withFileTypes:true}); }catch(err){ process.stderr.write(String(err.message)); process.exit(1); }",
+    "for(const e of ents){",
+    "  let st=null;",
+    // 系统文件（pagefile.sys 等）stat 会抛 EINVAL，忽略即可
+    "  try{ st=fs.statSync(path.join(dir,e.name),{throwIfNoEntry:false}); }catch(_){ st=null; }",
     "  const t=e.isDirectory()?'d':(e.isSymbolicLink()?'l':'f');",
     "  out.push([t, st?st.size:0, st?Math.floor(st.mtimeMs/1000):0, e.name].join(String.fromCharCode(9)));",
     "}",

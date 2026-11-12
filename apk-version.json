@@ -1,8 +1,8 @@
 {
-  "versionCode": 44,
-  "versionName": "0.45",
-  "publishedAt": "2026-11-12T05:53:15.530Z",
-  "notes": "修复 Windows 文件浏览\n\n修复：路径前导斜杠\n  C:\\Users 被改成 /C:\\Users 导致目录打不开\n  现在识别盘符和 UNC 路径原样保留\n\n修复：路径末尾反斜杠\n  C:\\ 会转义 cmd 收尾引号，已剥离\n\n改进：短命令用 node 直连，少一层 shell\n\n已知问题：Windows 每次 SSH 命令会弹 cmd 窗口\n  这是 Windows OpenSSH 的固有行为，客户端无法规避",
-  "url": "/download/pi-mobile-0.45.apk",
-  "size": 2988431
+  "versionCode": 45,
+  "versionName": "0.46",
+  "publishedAt": "2026-11-12T05:58:27.591Z",
+  "notes": "修复 Windows 文件浏览两个问题\n\n修复：路径显示成 //C:\\Users\\\n  前端 joinPath / 面包屑硬编码了 /，现在按盘符自动用反斜杠\n\n修复：C:\\ 根目录报 EINVAL (pagefile.sys)\n  系统文件的 stat 会抛异常，现在忽略该错误仍保留条目\n  C:\\ 现在能正常列出 29 项，含 pagefile.sys / Windows\n\n修复：C:\\ 被当成 C:\n  参数末尾反斜杠改为双写，而不是剥离",
+  "url": "/download/pi-mobile-0.46.apk",
+  "size": 2988705
 }
