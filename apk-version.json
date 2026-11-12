@@ -1,8 +1,8 @@
 {
-  "versionCode": 42,
-  "versionName": "0.43",
-  "publishedAt": "2026-11-12T04:38:37.078Z",
-  "notes": "支持 Windows 设备（无需安装任何东西）\n\n- 目标系统可选：自动检测 / Linux·macOS / Windows\n- Windows 通过 node 桥接启动 pi，管道不缓冲，RPC 实时\n- 窗口隐藏（windowsHide），不再弹控制台\n- 探测、文件列表、读写文件、会话操作全支持\n- Windows 下自动隐藏提权选项\n\n修复：ensureAlive 异步等待进程就绪，避免慢速设备上「pi 未运行」",
-  "url": "/download/pi-mobile-0.43.apk",
-  "size": 2988417
+  "versionCode": 43,
+  "versionName": "0.44",
+  "publishedAt": "2026-11-12T05:26:14.929Z",
+  "notes": "修复 Windows 相关两个问题\n\n修复：Windows 文件路径\n  之前强制给路径加前导斜杠，C:\\Users 变成 /C:\\Users 导致目录打不开\n  现在识别盘符和 UNC 路径，原样保留\n\n修复：Windows 桌面弹 cmd 窗口\n  改用 powershell -WindowStyle Hidden 包一层启动 pi\n  顺带解决进程被 0xC000013A 杀掉的问题（sshd 控制台销毁连带杀子进程）",
+  "url": "/download/pi-mobile-0.44.apk",
+  "size": 2988413
 }

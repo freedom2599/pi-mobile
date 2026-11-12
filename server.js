@@ -979,8 +979,22 @@ class PiSession {
         "child.on('error', e => { process.stderr.write(String(e.message || e) + '\\n'); process.exit(1); });",
       ].join('\n');
 
+      // 弹窗与进程被杀（0xC000013A）都源于 sshd 为 exec 分配的控制台：
+      //   - 直接跑 node.exe 会闪 cmd 窗口
+      //   - 会话结束时 conhost 销毁，连带杀掉 node
+      //
+      // 用 powershell -WindowStyle Hidden 包一层：既隐藏窗口，
+      // 又让 node 作为其子进程存活到 PowerShell 退出。
+      // 实测：RPC 收发正常（bridge 本身是 node 流式管道，无缓冲问题）。
       const b64 = Buffer.from(bridgeSrc, 'utf8').toString('base64');
-      cmd = `"${nodeExe}" -e "eval(Buffer.from(process.argv[1],'base64').toString())" "${b64}"`;
+      const psSrc = [
+        "$ErrorActionPreference='Continue'",
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8",
+        `$b=[Text.Encoding]::UTF8.GetBytes([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}')))`,
+        `& ${psQuote(nodeExe)} -e "eval(Buffer.from(process.argv[1],'base64').toString())" ([Convert]::ToBase64String($b))`,
+      ].join('; ');
+      const psB64 = Buffer.from(psSrc, 'utf16le').toString('base64');
+      cmd = `powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ${psB64}`;
     } else {
       const inner = [
         `cd ${cwd.startsWith('~') ? cwd : shellQuote(cwd)}`,
@@ -1438,9 +1452,18 @@ function isRemote(dev) {
 }
 
 /** 规范化路径，禁止越界（本机才做 resolve 校验） */
-function normalizeListPath(p) {
-  let out = String(p || '/').trim();
-  if (!out.startsWith('/') && !out.startsWith('~')) out = '/' + out;
+function normalizeListPath(p, dev) {
+  let out = String(p || '').trim();
+  // Windows 路径（C:\... / C:/...）原样返回，不能加前缀斜杠
+  if (/^[A-Za-z]:[\\/]/.test(out) || /^[A-Za-z]:$/.test(out)) {
+    return out.replace(/\//g, '\\');
+  }
+  // UNC 路径 \\server\share
+  if (out.startsWith('\\\\')) return out.replace(/\//g, '\\');
+  if (!out) {
+    return isWin(dev) ? (dev.cwd || dev.homeHint || 'C:\\') : '/';
+  }
+  if (!out.startsWith('/') && !out.startsWith('~') && !out.startsWith('\\')) out = '/' + out;
   return out;
 }
 
@@ -1563,7 +1586,7 @@ async function listDirRemote(dev, dir) {
 }
 
 async function listDir(dev, dir) {
-  const p = normalizeListPath(dir);
+  const p = normalizeListPath(dir, dev);
   if (isRemote(dev)) return listDirRemote(dev, p);
   return listDirLocal(p);
 }
