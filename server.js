@@ -80,6 +80,16 @@ function shellQuote(s) {
   return "'" + String(s).replace(/'/g, `'"'"'`) + "'";
 }
 
+/** PowerShell 单引号转义（内部单引号写两遍） */
+function psQuote(s) {
+  return "'" + String(s).replace(/'/g, "''") + "'";
+}
+
+/** 设备是否为 Windows（决定用哪个 shell 执行远程命令） */
+function isWin(dev) {
+  return dev && (dev.platform === 'win32' || dev.platform === 'windows' || dev.shell === 'powershell');
+}
+
 /**
  * 生成远端命令前缀：处理提权 + PATH。
  *
@@ -107,6 +117,20 @@ function wrapRemoteCmd(dev, inner) {
   if (!escalate) return `bash -lc ${shellQuote(full)}`;
   // sudo -n：无密码才继续；-H 让 HOME=/root；-i 加载登录环境
   return `sudo -n -H bash -lc ${shellQuote(full)}`;
+}
+
+/**
+ * 包装成 PowerShell 命令（Windows 设备）。
+ * Windows OpenSSH 的默认 shell 通常是 cmd.exe，所以显式调用 powershell。
+ * 不加 -ExecutionPolicy Bypass 的话，某些机器上脚本会被策略拦截。
+ */
+function wrapWinCmd(dev, inner) {
+  return `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(inner, 'utf16le').toString('base64')}`;
+}
+
+/** 统一入口：按设备平台选择包装方式 */
+function wrapCmd(dev, inner) {
+  return isWin(dev) ? wrapWinCmd(dev, inner) : wrapRemoteCmd(dev, inner);
 }
 
 // ---------------------------------------------------------------- 设备池
@@ -186,6 +210,7 @@ function saveDevices() {
       if (d.pathPrefix) o.pathPrefix = d.pathPrefix;
       if (d.helperPath) o.helperPath = d.helperPath;
       if (d.piBin && d.piBin !== 'pi') o.piBin = d.piBin;
+      if (d.platform) o.platform = d.platform;
     }
     return o;
   });
@@ -201,6 +226,7 @@ function publicDevice(d) {
     escalate: !!d.escalate,
     hasKey: !!(d.privateKey || d.privateKeyPath),
     hasPassword: !!d.password,
+    platform: d.platform || '',
   };
 }
 
@@ -292,8 +318,65 @@ function removeDevice(id) {
   saveDevices();
 }
 
+/**
+ * Windows 探测：输出同样的 __TAG__ 行，供 probeDevice 统一解析。
+ * 用 PowerShell 而不是 cmd，便于拿环境变量和路径。
+ */
+function winProbeScript() {
+  return `
+$ErrorActionPreference = 'SilentlyContinue'
+Write-Output "__PLATFORM__win32"
+Write-Output ("__HOME__" + $env:USERPROFILE)
+Write-Output ("__WHOAMI__" + $env:USERNAME)
+$node = (Get-Command node -ErrorAction SilentlyContinue)
+if ($node) {
+  Write-Output ("__NODE__" + $node.Source)
+  Write-Output ("__NODEV__" + (& node -v))
+}
+$pi = (Get-Command pi -ErrorAction SilentlyContinue)
+if ($pi) {
+  Write-Output ("__PI__" + $pi.Source)
+  $pv = (& pi --version 2>$null | Select-Object -First 1)
+  Write-Output ("__PIVER__" + $pv)
+}
+if (Test-Path (Join-Path $env:USERPROFILE ".pi")) { Write-Output "__PIHOME__yes" }
+$sess = Join-Path $env:USERPROFILE ".pi\\agent\\sessions"
+if (Test-Path $sess) {
+  Write-Output ("__SESSDIR__" + $sess)
+  Write-Output "__SESSREADABLE__yes"
+}
+# pi 可能的安装位置（npm 全局 / 官方安装器）
+$cands = @(
+  (Join-Path $env:APPDATA "npm"),
+  (Join-Path $env:LOCALAPPDATA "pnpm"),
+  (Join-Path $env:USERPROFILE ".bun\\bin"),
+  (Join-Path $env:USERPROFILE ".pi\\agent\\bin")
+)
+foreach ($c in $cands) {
+  if (Test-Path (Join-Path $c "node.exe")) { Write-Output ("__CAND__" + $c) }
+  elseif (Test-Path (Join-Path $c "pi.cmd")) { Write-Output ("__CAND__" + $c) }
+}
+`;
+}
+
 /** 自动探测远端环境：node 目录 / pi 包位置 / 家目录 / 会话目录 */
 async function probeDevice(d) {
+  // 未知平台时先探一次：POSIX 命令失败则改走 Windows 探测
+  if (!d.platform) {
+    try {
+      const t = await sshExec(d, 'uname -s 2>/dev/null || echo WINDOWS', 12000);
+      const out = String(t.stdout || '').trim();
+      // MINGW/MSYS/CYGWIN 自带 bash，走 POSIX 分支即可
+      const hasBash = /MINGW|MSYS|CYGWIN/i.test(out);
+      const isWinOs = !hasBash && /WINDOWS|^MINGW|^MSYS/i.test(out);
+      d.platform = isWinOs ? 'win32' : 'posix';
+    } catch {
+      d.platform = 'posix';
+    }
+  }
+
+  if (isWin(d)) return await probeDeviceWin(d);
+
   const probe = [
     'echo "__HOME__$HOME"',
     'echo "__WHOAMI__$(whoami)"',
@@ -514,6 +597,20 @@ async function sshExec(dev, cmd, timeoutMs = 30000) {
  * 脚本经 `node -e '<script>'` 传入，目标机磁盘上不新增任何文件。
  */
 function remoteNodeScript(dev, script, timeoutMs = 30000) {
+  if (isWin(dev)) {
+    // Windows：脚本经 base64 传输，避免任何引号/换行转义问题
+    const b64 = Buffer.from(script, 'utf8').toString('base64');
+    const nodeCmd = dev.nodeBin
+      ? `& ${psQuote(dev.nodeBin + '\\node.exe')}`
+      : 'node';
+    const inner = [
+      `$b64 = ${psQuote(b64)}`,
+      `$bytes = [Convert]::FromBase64String($b64)`,
+      `$code = [Text.Encoding]::UTF8.GetString($bytes)`,
+      `$code | ${nodeCmd} -`,
+    ].join('\n');
+    return sshExec(dev, wrapWinCmd(dev, inner), timeoutMs);
+  }
   const nodeBin = dev.nodeBin ? shellQuote(dev.nodeBin + '/node') : 'node';
   // 单引号包裹，内部单引号用 '\'' 转义
   const quoted = "'" + String(script).replace(/'/g, "'\\''") + "'";
@@ -614,6 +711,57 @@ async function remoteSessionOp(dev, op, arg1, arg2, timeoutMs = 30000) {
   try { j = JSON.parse(line); } catch { throw new Error('远端输出非 JSON: ' + line.slice(0, 200)); }
   if (!j.ok) throw new Error(j.error || '远端执行失败');
   return j.data;
+}
+
+
+/** Windows 设备探测 */
+async function probeDeviceWin(d) {
+  const cmd = wrapWinCmd(d, winProbeScript());
+  const r = await sshExec(d, cmd, 30000);
+  const lines = String(r.stdout || '').split('\n').map(x => x.trim());
+  const pick = (tag) => {
+    const l = lines.find(x => x.startsWith(tag));
+    return l ? l.slice(tag.length).trim() : '';
+  };
+
+  const home = pick('__HOME__') || 'C:\\Users\\' + (d.username || '');
+  const whoami = pick('__WHOAMI__');
+  const nodePath = pick('__NODE__');
+  const nodeVer = pick('__NODEV__');
+  const piPath = pick('__PI__');
+  let piVer = pick('__PIVER__');
+  const piWorks = !!(piVer && piVer !== 'NO');
+  if (!piVer) piVer = '';
+
+  // pi.cmd 所在目录加入 PATH 前缀（Windows 用 ; 分隔）
+  const cands = lines.filter(x => x.startsWith('__CAND__')).map(x => x.slice(8));
+  let nodeBin = '';
+  if (nodePath) {
+    const dir = nodePath.replace(/[\\/]node(\.exe)?$/i, '');
+    if (dir && !/\\Windows\\System32/i.test(dir)) nodeBin = dir;
+  }
+  if (!nodeBin && cands.length) nodeBin = cands[0];
+
+  const sessDir = pick('__SESSDIR__') ||
+    (home + '\\.pi\\agent\\sessions');
+  const sessReadable = pick('__SESSREADABLE__') === 'yes';
+  const hasPiHome = pick('__PIHOME__') === 'yes';
+
+  return {
+    home,
+    whoami,
+    nodeBin,
+    nodeVer: nodeVer || '',
+    piVer,
+    piWorks,
+    piPath,
+    hasPiHome,
+    platform: 'win32',
+    sessionDir: sessDir,
+    sessionReadable: sessReadable,
+    cwd: home,
+    helperPath: '',
+  };
 }
 
 // ---------------------------------------------------------------- 会话列表
@@ -751,13 +899,24 @@ class PiSession {
     const fs = require('fs');
     const d = this.dev;
     const args = this.buildArgs();
-    const cwd = d.cwd || '~';
+    const cwd = d.cwd || (isWin(d) ? d.homeHint || '' : '~');
     const piBin = d.piBin || 'pi';
-    const inner = [
-      `cd ${cwd.startsWith('~') ? cwd : shellQuote(cwd)}`,
-      `exec ${piBin} ${args.map(shellQuote).join(' ')}`,
-    ].join(' && ');
-    const cmd = wrapRemoteCmd(d, inner);
+
+    let cmd;
+    if (isWin(d)) {
+      // Windows：cd 到工作目录后启动 pi（pi 可能是 pi.cmd，PowerShell 需要 & 调用）
+      const piCall = /[\\/]|\.(cmd|bat|exe|ps1)$/i.test(piBin) ? `& ${psQuote(piBin)}` : 'pi';
+      const parts = [];
+      if (cwd) parts.push(`Set-Location -LiteralPath ${psQuote(cwd)}`);
+      parts.push(`${piCall} ${args.map(psQuote).join(' ')}`);
+      cmd = wrapWinCmd(d, parts.join('; '));
+    } else {
+      const inner = [
+        `cd ${cwd.startsWith('~') ? cwd : shellQuote(cwd)}`,
+        `exec ${piBin} ${args.map(shellQuote).join(' ')}`,
+      ].join(' && ');
+      cmd = wrapRemoteCmd(d, inner);
+    }
 
     log(`[${d.id}] ssh ${d.username || 'root'}@${d.host}:${d.port || 22} → ${cmd}`);
 
@@ -1245,8 +1404,48 @@ async function listDirLocal(dir) {
   return out;
 }
 
+/** 列出远程目录（Windows / PowerShell） */
+async function listDirRemoteWin(dev, dir) {
+  const inner = [
+    `$p = ${psQuote(dir)}`,
+    `if (-not (Test-Path -LiteralPath $p)) { Write-Output '__ERR__'; exit }`,
+    `Get-ChildItem -LiteralPath $p -Force | ForEach-Object {`,
+    `  $t = if ($_.PSIsContainer) { 'd' } elseif ($_.LinkType) { 'l' } else { 'f' }`,
+    `  $mt = [int64](($_.LastWriteTimeUtc - [datetime]'1970-01-01').TotalSeconds)`,
+    `  $sz = if ($_.PSIsContainer) { 0 } else { $_.Length }`,
+    '  Write-Output ($t + "`t" + $sz + "`t" + $mt + "`t" + $_.Name)',
+    `}`,
+  ].join('\n');
+  const r = await sshExec(dev, wrapWinCmd(dev, inner), 25000);
+  const lines = String(r.stdout || '').split('\n').map(x => x.replace(/\r$/, '')).filter(Boolean);
+  if (lines.some(l => l.startsWith('__ERR__'))) throw new Error('目录不存在: ' + dir);
+
+  const out = [];
+  for (const line of lines) {
+    const parts = line.split('\t');
+    if (parts.length < 4) continue;
+    const [t, size, mtime, ...rest] = parts;
+    const name = rest.join('\t');
+    if (!name || ignoreName(name)) continue;
+    out.push({
+      name,
+      type: t === 'd' ? 'dir' : t === 'l' ? 'link' : 'file',
+      size: Number(size) || 0,
+      mtime: (Number(mtime) || 0) * 1000,
+    });
+  }
+  out.sort((a, b) => {
+    const da = a.type !== 'file' ? 0 : 1;
+    const db = b.type !== 'file' ? 0 : 1;
+    if (da !== db) return da - db;
+    return a.name.localeCompare(b.name, 'zh');
+  });
+  return out;
+}
+
 /** 列出远程目录（走 SSH） */
 async function listDirRemote(dev, dir) {
+  if (isWin(dev)) return listDirRemoteWin(dev, dir);
   const p = dir.startsWith('~') || dir.startsWith('/') ? dir : './' + dir;
   // 用 find 输出：类型|大小|mtime|名字（  分隔避免空格问题）
   const script = [
@@ -1301,11 +1500,86 @@ const ATTACH = {
   maxImageCount: 4,
 };
 
+/**
+ * 跨平台远程文件操作（POSIX / Windows）。
+ * 返回统一结构，调用方不需要关心平台。
+ */
+
+/** 文件大小；不存在返回 null */
+async function remoteStatSize(dev, filePath) {
+  if (isWin(dev)) {
+    const inner = `
+$p = ${psQuote(filePath)}
+if (Test-Path -LiteralPath $p -PathType Leaf) {
+  (Get-Item -LiteralPath $p).Length
+} else { 'ERR' }
+`;
+    const r = await sshExec(dev, wrapWinCmd(dev, inner.trim()), 15000);
+    const v = String(r.stdout || '').trim().split('\n').pop();
+    if (!v || v === 'ERR' || !/^\d+$/.test(v)) return null;
+    return Number(v);
+  }
+  const r = await sshExec(dev, wrapRemoteCmd(dev, `stat -c '%s' ${shellQuote(filePath)} 2>/dev/null || echo ERR`), 15000);
+  const v = String(r.stdout || '').trim().split('\n').pop();
+  if (!v || v === 'ERR' || !/^\d+$/.test(v)) return null;
+  return Number(v);
+}
+
+/** 读文件前 N 字节（二进制） */
+async function remoteReadBytes(dev, filePath, maxBytes) {
+  if (isWin(dev)) {
+    const inner = `
+$p = ${psQuote(filePath)}
+$fs = [IO.File]::OpenRead($p)
+try {
+  $n = [Math]::Min(${Number(maxBytes)}, $fs.Length)
+  $buf = New-Object byte[] $n
+  $read = $fs.Read($buf, 0, $n)
+  [Convert]::ToBase64String($buf, 0, $read)
+} finally { $fs.Close() }
+`;
+    const r = await sshExec(dev, wrapWinCmd(dev, inner.trim()), 40000);
+    return Buffer.from(String(r.stdout || '').replace(/\s+/g, ''), 'base64');
+  }
+  const r = await sshExec(dev, wrapRemoteCmd(dev, `head -c ${Number(maxBytes)} ${shellQuote(filePath)} | base64 -w0`), 40000);
+  return Buffer.from(String(r.stdout || '').trim(), 'base64');
+}
+
+/** 读文件全文（二进制，用于图片预览） */
+async function remoteReadAll(dev, filePath) {
+  if (isWin(dev)) {
+    const inner = `[Convert]::ToBase64String([IO.File]::ReadAllBytes(${psQuote(filePath)}))`;
+    const r = await sshExec(dev, wrapWinCmd(dev, inner), 60000);
+    return Buffer.from(String(r.stdout || '').replace(/\s+/g, ''), 'base64');
+  }
+  const r = await sshExec(dev, wrapRemoteCmd(dev, `base64 -w0 ${shellQuote(filePath)}`), 40000);
+  return Buffer.from(String(r.stdout || '').trim(), 'base64');
+}
+
+/** 读文件文本（前 N 字节） */
+async function remoteReadText(dev, filePath, maxBytes) {
+  if (isWin(dev)) {
+    const inner = `
+$p = ${psQuote(filePath)}
+$fs = [IO.File]::OpenRead($p)
+try {
+  $n = [Math]::Min(${Number(maxBytes)}, $fs.Length)
+  $buf = New-Object byte[] $n
+  $read = $fs.Read($buf, 0, $n)
+  [Console]::Out.Write([Text.Encoding]::UTF8.GetString($buf, 0, $read))
+} finally { $fs.Close() }
+`;
+    const r = await sshExec(dev, wrapWinCmd(dev, inner.trim()), 30000);
+    return String(r.stdout || '');
+  }
+  const r = await sshExec(dev, wrapRemoteCmd(dev, `head -c ${Number(maxBytes)} ${shellQuote(filePath)} 2>/dev/null`), 30000);
+  return String(r.stdout || '');
+}
+
 /** 读附件原始内容（本机/远程统一） */
 async function readAttach(dev, filePath, maxBytes) {
   if (isRemote(dev)) {
-    const b64 = await sshExec(dev, wrapRemoteCmd(dev, `head -c ${maxBytes} ${shellQuote(filePath)} | base64 -w0`), 40000);
-    return Buffer.from(b64.stdout.trim(), 'base64');
+    return await remoteReadBytes(dev, filePath, maxBytes);
   }
   const fsP = require('fs/promises');
   const resolved = filePath.startsWith('~')
@@ -1512,23 +1786,16 @@ async function readFilePreview(dev, filePath) {
   const mime = IMAGE_MIME[ext] || 'application/octet-stream';
 
   if (isRemote(dev)) {
-    // 先 stat 拿大小
-    const statCmd = wrapRemoteCmd(dev, `stat -c '%s' ${shellQuote(filePath)} 2>/dev/null || echo ERR`);
-    const sr = await sshExec(dev, statCmd, 15000);
-    const sizeStr = sr.stdout.trim().split('\n').pop();
-    if (sizeStr === 'ERR' || !sizeStr) return null;
-    const size = Number(sizeStr);
+    const size = await remoteStatSize(dev, filePath);
+    if (size === null) return null;
 
     if (IMAGE_MIME[ext]) {
       if (size > PREVIEW_BIN_MAX) throw new Error('图片太大（' + humanSize(size) + '）');
-      // base64 传回（SSH 通道是文本）
-      const b64 = await sshExec(dev, wrapRemoteCmd(dev, `base64 -w0 ${shellQuote(filePath)}`), 40000);
-      const data = Buffer.from(b64.stdout.trim(), 'base64');
+      const data = await remoteReadAll(dev, filePath);
       return { binary: true, mime, name, size, data };
     }
     const maxRead = Math.min(size, PREVIEW_TEXT_MAX);
-    const tr = await sshExec(dev, wrapRemoteCmd(dev, `head -c ${maxRead} ${shellQuote(filePath)} 2>/dev/null`), 30000);
-    const text = tr.stdout;
+    const text = await remoteReadText(dev, filePath, maxRead);
     return {
       binary: false, name, size,
       truncated: size > PREVIEW_TEXT_MAX,

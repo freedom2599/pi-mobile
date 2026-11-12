@@ -1,8 +1,8 @@
 {
-  "versionCode": 40,
-  "versionName": "0.41",
-  "publishedAt": "2026-11-12T03:20:16.299Z",
-  "notes": "修复版本号显示：区分 versionCode(39) 和 versionName(0.4)\n\n- 之前显示成 v0.39，实际应该是 v0.4\n- 现在版本名单独传入，不再拼接 versionCode\n- 检查更新已是最新时会明确提示",
-  "url": "/download/pi-mobile-0.41.apk",
-  "size": 2988100
+  "versionCode": 41,
+  "versionName": "0.42",
+  "publishedAt": "2026-11-12T03:36:31.245Z",
+  "notes": "支持连接 Windows 设备\n\n- 目标系统可选：自动检测 / Linux·macOS / Windows\n- Windows 走 PowerShell（-EncodedCommand 传参，避免引号转义问题）\n- 探测、文件列表、读文件、会话操作都有 Windows 实现\n- Windows 下自动隐藏「提权到 root」（无 sudo）\n- 装了 Git Bash 的 Windows 仍走 POSIX 分支\n\n目标机不需要装任何东西，只要开 OpenSSH Server",
+  "url": "/download/pi-mobile-0.42.apk",
+  "size": 2988415
 }
